@@ -24,7 +24,12 @@ namespace System.IO.Pipes
             // either succeeding immediately if the server is listening or failing
             // immediately if it isn't.  The only delay will be between the time the server
             // has called Bind and Listen, with the latter immediately following the former.
-            var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            var socketType = SocketType.Stream;
+            if (ReadMode == PipeTransmissionMode.Message)
+            {
+                socketType = SocketType.Seqpacket;
+            }
+            var socket = new Socket(AddressFamily.Unix, socketType, ProtocolType.Unspecified);
             SafePipeHandle? clientHandle = null;
             try
             {
@@ -111,6 +116,16 @@ namespace System.IO.Pipes
             if (userId != serverOwner)
             {
                 throw new UnauthorizedAccessException(SR.UnauthorizedAccess_NotOwnedByCurrentUser);
+            }
+        }
+
+        protected internal override void CheckPipePropertyOperations()
+        {
+            base.CheckPipePropertyOperations();
+
+            if (State == PipeState.Broken)
+            {
+                throw new IOException(SR.IO_PipeBroken);
             }
         }
     }

@@ -33,17 +33,13 @@ namespace System.IO.Pipes
             Debug.Assert((maxNumberOfServerInstances >= 1) || (maxNumberOfServerInstances == MaxAllowedServerInstances), "maxNumberOfServerInstances is invalid");
             Debug.Assert(transmissionMode >= PipeTransmissionMode.Byte && transmissionMode <= PipeTransmissionMode.Message, "transmissionMode is out of range");
 
-            if (transmissionMode == PipeTransmissionMode.Message)
-            {
-                throw new PlatformNotSupportedException(SR.PlatformNotSupported_MessageTransmissionMode);
-            }
-
             // We don't have a good way to enforce maxNumberOfServerInstances across processes; we only factor it in
             // for streams created in this process.  Between processes, we behave similarly to maxNumberOfServerInstances == 1,
             // in that the second process to come along and create a stream will find the pipe already in existence and will fail.
             _instance = SharedServer.Get(
                 GetPipePath(".", pipeName),
-                (maxNumberOfServerInstances == MaxAllowedServerInstances) ? int.MaxValue : maxNumberOfServerInstances);
+                (maxNumberOfServerInstances == MaxAllowedServerInstances) ? int.MaxValue : maxNumberOfServerInstances,
+                transmissionMode);
 
             _direction = direction;
             _options = options;
@@ -243,13 +239,15 @@ namespace System.IO.Pipes
             internal string PipeName { get; }
             /// <summary>Gets the shared socket used to accept connections.</summary>
             internal Socket ListeningSocket { get; }
+            /// <summary> Transmission Mode for this instance. </summary>
+            internal PipeTransmissionMode TransmissionMode { get; }
 
             /// <summary>The maximum number of server streams allowed to use this instance concurrently.</summary>
             private readonly int _maxCount;
             /// <summary>The concurrent number of concurrent streams using this instance.</summary>
             private int _currentCount;
 
-            internal static SharedServer Get(string path, int maxCount)
+            internal static SharedServer Get(string path, int maxCount, PipeTransmissionMode transmissionMode)
             {
                 Debug.Assert(!string.IsNullOrEmpty(path));
                 Debug.Assert(maxCount >= 1);
@@ -276,7 +274,7 @@ namespace System.IO.Pipes
                     else
                     {
                         // No instance exists yet for this path. Create one a new.
-                        server = new SharedServer(path, maxCount);
+                        server = new SharedServer(path, maxCount, transmissionMode);
                         s_servers.Add(path, server);
                     }
 
@@ -311,15 +309,20 @@ namespace System.IO.Pipes
                 }
             }
 
-            private SharedServer(string path, int maxCount)
+            private SharedServer(string path, int maxCount, PipeTransmissionMode transmissionMode)
             {
                 // Binding to an existing path fails, so we need to remove anything left over at this location.
                 // There's of course a race condition here, where it could be recreated by someone else between this
                 // deletion and the bind below, in which case we'll simply let the bind fail and throw.
                 Interop.Sys.Unlink(path); // ignore any failures
 
+                var socketType = SocketType.Stream;
+                if (transmissionMode == PipeTransmissionMode.Message)
+                {
+                    socketType = SocketType.Seqpacket;
+                }
                 // Start listening for connections on the path.
-                var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                var socket = new Socket(AddressFamily.Unix, socketType, ProtocolType.Unspecified);
                 try
                 {
                     socket.Bind(new UnixDomainSocketEndPoint(path));
@@ -333,6 +336,7 @@ namespace System.IO.Pipes
 
                 PipeName = path;
                 ListeningSocket = socket;
+                TransmissionMode = transmissionMode;
                 _maxCount = maxCount;
             }
         }

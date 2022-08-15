@@ -150,5 +150,21 @@ namespace System.IO.Pipes
                 }
             }
         }
+
+        // override because named pipe clients can't get/set properties when waiting to connect
+        // or broken
+        protected internal override void CheckPipePropertyOperations()
+        {
+            base.CheckPipePropertyOperations();
+
+            if (State == PipeState.WaitingToConnect)
+            {
+                throw new InvalidOperationException(SR.InvalidOperation_PipeNotYetConnected);
+            }
+            if (State == PipeState.Broken)
+            {
+                throw new IOException(SR.IO_PipeBroken);
+            }
+        }
     }
 }

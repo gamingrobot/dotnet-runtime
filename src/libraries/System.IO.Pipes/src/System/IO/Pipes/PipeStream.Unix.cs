@@ -32,6 +32,8 @@ namespace System.IO.Pipes
         /// <summary>Prefix to prepend to all pipe names.</summary>
         private static readonly string s_pipePrefix = Path.Combine(Path.GetTempPath(), "CoreFxPipe_");
 
+        private MemoryStream s_messageBuffer = new MemoryStream();
+
         public override int Read(byte[] buffer, int offset, int count)
         {
             ValidateBufferArguments(buffer, offset, count);
@@ -269,7 +271,53 @@ namespace System.IO.Pipes
             // is already handled by Socket.Receive, so we use it here.
             try
             {
-                return _handle!.PipeSocket.Receive(buffer, SocketFlags.None);
+                if (TransmissionMode == PipeTransmissionMode.Message)
+                {
+                    Debug.WriteLine("Starting ReadCore");
+                    if (s_messageBuffer.Length != 0)
+                    {
+                        Debug.WriteLine($"MessageBuffer has data {s_messageBuffer.Length - s_messageBuffer.Position}");
+                        var bytesRead = s_messageBuffer.Read(buffer);
+                        if (s_messageBuffer.Position == s_messageBuffer.Length)
+                        {
+                            s_messageBuffer.SetLength(0);
+                            UpdateMessageCompletion(true);
+                        }
+                        return bytesRead;
+                    }
+
+                    // ioctl with FIONREAD when using SocketType.Seqpacket does not respect message boundaries
+                    // and will return all of the data pending/available.
+                    // Linux Kernel 3.4 added support for Truncated + Peek will return the bytes
+                    // with respect to message boundaries.
+                    // https://lore.kernel.org/netdev/1329902695.18384.101.camel@edumazet-laptop/
+                    var messageLength = _handle!.PipeSocket.Receive(new byte[1], SocketFlags.Truncated | SocketFlags.Peek);
+                    Debug.WriteLine($"Message Length: {messageLength}");
+                    if (buffer.Length >= messageLength)
+                    {
+                        Debug.WriteLine($"Buffer {buffer.Length} bigger than Message Length {messageLength}");
+                        var bytesRead = _handle!.PipeSocket.Receive(buffer, SocketFlags.None);
+                        UpdateMessageCompletion(true);
+                        return bytesRead;
+                    }
+                    else
+                    {
+                        Debug.WriteLine($"Buffer {buffer.Length} smaller than Message Length {messageLength}");
+                        //We have to read the full message at once otherwise the rest of the message is discarded
+                        var fullBuffer = new byte[messageLength];
+                        var rawBytesRead = _handle!.PipeSocket.Receive(fullBuffer, SocketFlags.None);
+                        //Debug.WriteLine($"RawBytesRead {rawBytesRead}");
+                        s_messageBuffer.Write(fullBuffer);
+                        s_messageBuffer.Position = 0;
+                        var bytesRead = s_messageBuffer.Read(buffer);
+                        UpdateMessageCompletion(false);
+                        return bytesRead;
+                    }
+                }
+                else
+                {
+                    return _handle!.PipeSocket.Receive(buffer, SocketFlags.None);
+                }
             }
             catch (SocketException e)
             {
@@ -362,7 +410,7 @@ namespace System.IO.Pipes
             get
             {
                 CheckPipePropertyOperations();
-                return PipeTransmissionMode.Byte; // Unix pipes are only byte-based, not message-based
+                return _transmissionMode;
             }
         }
 
@@ -403,7 +451,7 @@ namespace System.IO.Pipes
             get
             {
                 CheckPipePropertyOperations();
-                return PipeTransmissionMode.Byte; // Unix pipes are only byte-based, not message-based
+                return _readMode;
             }
             set
             {
@@ -413,12 +461,7 @@ namespace System.IO.Pipes
                     throw new ArgumentOutOfRangeException(nameof(value), SR.ArgumentOutOfRange_TransmissionModeByteOrMsg);
                 }
 
-                if (value != PipeTransmissionMode.Byte) // Unix pipes are only byte-based, not message-based
-                {
-                    throw new PlatformNotSupportedException(SR.PlatformNotSupported_MessageTransmissionMode);
-                }
-
-                // nop, since it's already the only valid value
+                _readMode = value;
             }
         }
 
